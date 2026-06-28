@@ -45,4 +45,5 @@ impl Default for CurrentTask {
 pub struct Path {
     pub steps: Vec<(i32, i32)>,
     pub current_step: usize,
+    pub move_progress: f32,
 }

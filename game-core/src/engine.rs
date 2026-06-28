@@ -4,15 +4,14 @@ use rand::Rng;
 use crate::components::*;
 use crate::events::*;
 use crate::pathfinding;
-use crate::world::World;
+use crate::world::{World, move_cost};
 
 const FOOD_DECAY_RATE: f32 = 0.02;
 const SLEEP_DECAY_RATE: f32 = 0.015;
 const NEED_THRESHOLD: f32 = 0.5;
 const RESTORE_RATE: f32 = 0.1;
-const COLONIST_NAMES: &[&str] = &[
-    "Ada", "Rex", "Nova", "Colt", "Iris", "Juno", "Axel", "Wren",
-];
+const BASE_MOVE_SPEED: f32 = 3.0;
+const COLONIST_NAMES: &[&str] = &["Ada", "Rex", "Nova", "Colt", "Iris", "Juno", "Axel", "Wren"];
 
 pub struct GameEngine {
     pub ecs_world: bevy_ecs::world::World,
@@ -113,10 +112,8 @@ impl GameEngine {
         }
 
         let id = self.next_id();
-        self.ecs_world.spawn((
-            Building { id, building_type },
-            Position { x, y },
-        ));
+        self.ecs_world
+            .spawn((Building { id, building_type }, Position { x, y }));
 
         self.outgoing_events.push(OutgoingEvent::BuildingPlaced {
             building_type,
@@ -157,9 +154,7 @@ impl GameEngine {
                     self.place_building(building_type, x, y);
                 }
                 // SetSpeed, Pause, Resume are handled by the worker, not the engine
-                IncomingEvent::SetSpeed { .. }
-                | IncomingEvent::Pause
-                | IncomingEvent::Resume => {}
+                IncomingEvent::SetSpeed { .. } | IncomingEvent::Pause | IncomingEvent::Resume => {}
             }
         }
 
@@ -236,12 +231,7 @@ impl GameEngine {
                     if let Some((bx, by, path)) =
                         find_nearest(&self.tile_world, pos.x, pos.y, &bushes, &occupied)
                     {
-                        assignments.push((
-                            entity,
-                            ColonistTask::MovingToFood,
-                            path,
-                            (bx, by),
-                        ));
+                        assignments.push((entity, ColonistTask::MovingToFood, path, (bx, by)));
                         continue;
                     }
                 }
@@ -251,12 +241,7 @@ impl GameEngine {
                     if let Some((bx, by, path)) =
                         find_nearest(&self.tile_world, pos.x, pos.y, &beds, &occupied)
                     {
-                        assignments.push((
-                            entity,
-                            ColonistTask::MovingToBed,
-                            path,
-                            (bx, by),
-                        ));
+                        assignments.push((entity, ColonistTask::MovingToBed, path, (bx, by)));
                         continue;
                     }
                 }
@@ -270,12 +255,7 @@ impl GameEngine {
                         pathfinding::find_path(&self.tile_world, pos.x, pos.y, wx, wy, &occupied)
                     {
                         if !path.is_empty() {
-                            assignments.push((
-                                entity,
-                                ColonistTask::Wandering,
-                                path,
-                                (wx, wy),
-                            ));
+                            assignments.push((entity, ColonistTask::Wandering, path, (wx, wy)));
                         }
                     }
                 }
@@ -292,24 +272,58 @@ impl GameEngine {
                 self.ecs_world.entity_mut(entity).insert(Path {
                     steps: path,
                     current_step: 0,
+                    move_progress: 0.0,
                 });
             }
         }
     }
 
-    // Move colonists along paths
-    fn move_colonists(&mut self, _dt: f32) {
+    // Move colonists along paths using rate-based progress with carry-the-remainder.
+    // `move_progress` accumulates at `BASE_MOVE_SPEED / move_cost(target_tile)` cells/sec.
+    // When it crosses 1.0, advance `current_step`, subtract 1.0, and re-check against the
+    // next cell's cost so a single large `dt` can correctly traverse multiple cells.
+    fn move_colonists(&mut self, dt: f32) {
         let mut completed: Vec<Entity> = Vec::new();
+        let tile_world = &self.tile_world;
 
         {
             let mut query = self.ecs_world.query::<(Entity, &mut Position, &mut Path)>();
             for (entity, mut pos, mut path) in query.iter_mut(&mut self.ecs_world) {
-                if path.current_step < path.steps.len() {
-                    let (nx, ny) = path.steps[path.current_step];
-                    pos.x = nx;
-                    pos.y = ny;
-                    path.current_step += 1;
+                if path.current_step >= path.steps.len() {
+                    completed.push(entity);
+                    continue;
                 }
+
+                let mut remaining_dt = dt;
+                // Advance through as many cells as `remaining_dt` allows.
+                while remaining_dt > 0.0 && path.current_step < path.steps.len() {
+                    let (nx, ny) = path.steps[path.current_step];
+                    let cost = move_cost(tile_world.get_tile(nx, ny));
+                    if !cost.is_finite() {
+                        // Impassable target — freeze. Should not happen given pathfinding,
+                        // but guard so we never teleport onto Water.
+                        break;
+                    }
+                    let rate = BASE_MOVE_SPEED / cost; // cells/sec
+                    let needed = 1.0 - path.move_progress; // progress to reach the next cell
+                    let possible = remaining_dt * rate; // progress affordable with remaining_dt
+
+                    if possible < needed {
+                        // Stay in the current "from cell"; partial progress toward the next.
+                        path.move_progress += possible;
+                        remaining_dt = 0.0;
+                    } else {
+                        // Cross the boundary: spend just enough dt to finish this cell,
+                        // advance Position to the entered cell, and carry the remainder.
+                        let dt_used = needed / rate;
+                        remaining_dt -= dt_used;
+                        pos.x = nx;
+                        pos.y = ny;
+                        path.current_step += 1;
+                        path.move_progress = 0.0;
+                    }
+                }
+
                 if path.current_step >= path.steps.len() {
                     completed.push(entity);
                 }
@@ -340,9 +354,7 @@ impl GameEngine {
         let mut finished: Vec<Entity> = Vec::new();
 
         {
-            let mut query = self
-                .ecs_world
-                .query::<(Entity, &mut Needs, &CurrentTask)>();
+            let mut query = self.ecs_world.query::<(Entity, &mut Needs, &CurrentTask)>();
             for (entity, mut needs, task) in query.iter_mut(&mut self.ecs_world) {
                 match task.task {
                     ColonistTask::Eating => {
@@ -374,15 +386,29 @@ impl GameEngine {
     fn emit_snapshot(&mut self) {
         let mut colonists = Vec::new();
         {
-            let mut query = self
-                .ecs_world
-                .query::<(&ColonistTag, &Position, &Needs, &CurrentTask)>();
-            for (tag, pos, needs, task) in query.iter(&self.ecs_world) {
+            let mut query =
+                self.ecs_world
+                    .query::<(&ColonistTag, &Position, &Needs, &CurrentTask, Option<&Path>)>();
+            for (tag, pos, needs, task, path) in query.iter(&self.ecs_world) {
+                // For a moving colonist, expose the cell it is heading toward and the
+                // current float progress so the renderer can lerp; stationary colonists
+                // get nulls + 0.0 progress (no `Path` component).
+                let (next_x, next_y, move_progress) = match path {
+                    Some(p) if p.current_step < p.steps.len() => {
+                        let (nx, ny) = p.steps[p.current_step];
+                        (Some(nx), Some(ny), p.move_progress)
+                    }
+                    _ => (None, None, 0.0),
+                };
+
                 colonists.push(ColonistState {
                     id: tag.id,
                     name: tag.name.clone(),
                     x: pos.x,
                     y: pos.y,
+                    next_x,
+                    next_y,
+                    move_progress,
                     food: needs.food,
                     sleep: needs.sleep,
                     task: task.task,

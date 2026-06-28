@@ -70,6 +70,11 @@ pub struct ColonistState {
     pub name: String,
     pub x: i32,
     pub y: i32,
+    /// Integer cell being entered, or `None` when stationary (no `Path`).
+    pub next_x: Option<i32>,
+    pub next_y: Option<i32>,
+    /// Fraction of the way from `(x, y)` to `(next_x, next_y)` in [0, 1]. 0.0 when stationary.
+    pub move_progress: f32,
     pub food: f32,
     pub sleep: f32,
     pub task: ColonistTask,

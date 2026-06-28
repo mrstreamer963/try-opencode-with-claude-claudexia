@@ -7,7 +7,7 @@ use crate::world::World;
 struct Node {
     x: i32,
     y: i32,
-    cost: i32,    // g-cost
+    cost: i32,     // g-cost
     priority: i32, // f-cost (g + h)
 }
 

@@ -201,11 +201,18 @@ let lastSnapshotRef: WorldSnapshot | null = null
 
 function render() {
   const snap = props.snapshot
-  if (!snap || snap === lastSnapshotRef) return
-  lastSnapshotRef = snap
+  if (!snap) return
 
-  renderTerrain(snap)
-  renderBuildings(snap.buildings)
+  // Dirty-gate ONLY terrain and buildings — they're static between snapshots.
+  // Entities and the placement blueprint redraw every Pixi ticker frame so
+  // colonist motion can interpolate between cells and the blueprint can
+  // follow the hover position without waiting for the next snapshot.
+  if (snap !== lastSnapshotRef) {
+    lastSnapshotRef = snap
+    renderTerrain(snap)
+    renderBuildings(snap.buildings)
+  }
+
   renderEntities(snap.colonists)
   renderBlueprint()
 }
@@ -259,8 +266,17 @@ function renderEntities(colonists: ColonistState[]) {
   for (let i = 0; i < colonists.length; i++) {
     const c = colonists[i]
     const color = COLONIST_COLORS[i % COLONIST_COLORS.length]
-    const cx = c.x * TILE_SIZE + TILE_SIZE / 2
-    const cy = c.y * TILE_SIZE + TILE_SIZE / 2
+    // Interpolate between the logical "from" cell (x, y) and the cell being
+    // entered (next_x, next_y) using the simulation-provided move_progress.
+    // When next_x/next_y are null the colonist is stationary — draw at (x, y).
+    const fx = c.next_x != null && c.next_y != null
+      ? c.x + (c.next_x - c.x) * c.move_progress
+      : c.x
+    const fy = c.next_x != null && c.next_y != null
+      ? c.y + (c.next_y - c.y) * c.move_progress
+      : c.y
+    const cx = fx * TILE_SIZE + TILE_SIZE / 2
+    const cy = fy * TILE_SIZE + TILE_SIZE / 2
     const radius = TILE_SIZE * 0.35
 
     // Body circle

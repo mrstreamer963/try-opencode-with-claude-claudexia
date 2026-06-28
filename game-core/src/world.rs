@@ -149,3 +149,14 @@ impl World {
         x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32
     }
 }
+
+/// Per-tile movement cost. Grass = 1.0 (baseline), Sand = 1.8 (slower), Water = ∞ (impassable).
+/// Mirrors RimWorld's `pathCost`: higher = slower. Used in `move_colonists` so dividing
+/// `BASE_MOVE_SPEED` by `move_cost(tile)` yields cells-per-second for that tile.
+pub fn move_cost(tile: TileType) -> f32 {
+    match tile {
+        TileType::Grass => 1.0,
+        TileType::Sand => 1.8,
+        TileType::Water => f32::INFINITY,
+    }
+}
